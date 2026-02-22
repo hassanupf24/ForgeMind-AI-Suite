@@ -1,0 +1,195 @@
+# =====================================================
+# ForgeMind AI Suite — Docker Compose
+# Full stack: App + PostgreSQL + TimescaleDB + Kafka + 
+# Redis + MQTT + Prometheus + Grafana + Jaeger
+# =====================================================
+
+version: "3.9"
+
+services:
+  # ── ForgeMind API ──
+  forgemind-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: forgemind-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./models:/app/models
+    networks:
+      - forgemind-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── PostgreSQL (relational) ──
+  postgres:
+    image: postgres:16-alpine
+    container_name: forgemind-postgres
+    environment:
+      POSTGRES_DB: forgemind
+      POSTGRES_USER: forgemind
+      POSTGRES_PASSWORD: changeme
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - forgemind-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forgemind"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── TimescaleDB (time-series) ──
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: forgemind-timescaledb
+    environment:
+      POSTGRES_DB: forgemind_ts
+      POSTGRES_USER: forgemind
+      POSTGRES_PASSWORD: changeme
+    ports:
+      - "5433:5432"
+    volumes:
+      - ts_data:/var/lib/postgresql/data
+    networks:
+      - forgemind-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forgemind"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Apache Kafka (via KRaft) ──
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: forgemind-kafka
+    ports:
+      - "9092:9092"
+    environment:
+      - KAFKA_CFG_NODE_ID=0
+      - KAFKA_CFG_PROCESS_ROLES=controller,broker
+      - KAFKA_CFG_CONTROLLER_QUORUM_VOTERS=0@kafka:9093
+      - KAFKA_CFG_LISTENERS=PLAINTEXT://:9092,CONTROLLER://:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://kafka:9092
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      - KAFKA_CFG_CONTROLLER_LISTENER_NAMES=CONTROLLER
+      - KAFKA_CFG_AUTO_CREATE_TOPICS_ENABLE=true
+      - KAFKA_CFG_NUM_PARTITIONS=6
+      - KAFKA_CFG_DEFAULT_REPLICATION_FACTOR=1
+    volumes:
+      - kafka_data:/bitnami/kafka
+    networks:
+      - forgemind-net
+
+  # ── Redis (cache) ──
+  redis:
+    image: redis:7-alpine
+    container_name: forgemind-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - forgemind-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Eclipse Mosquitto (MQTT) ──
+  mqtt:
+    image: eclipse-mosquitto:2
+    container_name: forgemind-mqtt
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./docker/mosquitto/config:/mosquitto/config
+      - mqtt_data:/mosquitto/data
+    networks:
+      - forgemind-net
+
+  # ── Prometheus (metrics) ──
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: forgemind-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - forgemind-net
+
+  # ── Grafana (dashboards) ──
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: forgemind-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=forgemind
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - forgemind-net
+
+  # ── Jaeger (tracing) ──
+  jaeger:
+    image: jaegertracing/all-in-one:1.55
+    container_name: forgemind-jaeger
+    ports:
+      - "16686:16686"  # UI
+      - "14268:14268"  # Collector
+      - "6831:6831/udp"
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    networks:
+      - forgemind-net
+
+  # ── NGINX (API Gateway) ──
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: forgemind-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf
+    depends_on:
+      - forgemind-api
+    networks:
+      - forgemind-net
+
+volumes:
+  pg_data:
+  ts_data:
+  kafka_data:
+  redis_data:
+  mqtt_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  forgemind-net:
+    driver: bridge
